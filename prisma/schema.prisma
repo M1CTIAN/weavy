@@ -1,0 +1,59 @@
+// prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model Workflow {
+  id        String   @id @default(uuid())
+  userId    String   // From Clerk
+  name      String
+  nodes     Json     // Stores the React Flow nodes array
+  edges     Json     // Stores the React Flow edges array
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  // Relation to runs
+  runs      WorkflowRun[]
+}
+
+model WorkflowRun {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  status    String   // "PENDING", "SUCCESS", "FAILED"
+  scope     String   // "FULL", "SINGLE", "PARTIAL"
+  
+  // Relation to Workflow
+  workflowId String?
+  workflow   Workflow? @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+
+  // Relation to Node Executions
+  nodes     NodeExecution[]
+}
+
+model NodeExecution {
+  id        String   @id @default(cuid())
+  
+  // ✅ FIX: Keep only 'runId' to link back to WorkflowRun
+  runId     String
+  run       WorkflowRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+   
+  nodeId    String
+  nodeType  String
+  nodeLabel String?
+   
+  status    String      // "PENDING", "SUCCESS", "FAILED"
+  startTime DateTime    @default(now())
+  endTime   DateTime?
+  duration  Int?        // in milliseconds
+   
+  inputs    String?     // Store as JSON string
+  outputs   String?     // Store as JSON string
+  error     String?
+}
