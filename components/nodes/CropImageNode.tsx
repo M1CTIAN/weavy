@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Handle, Position, NodeProps, useStore, useReactFlow } from 'reactflow';
 import { Crop, Play, Loader2, Settings2, Info, Terminal } from 'lucide-react';
 import { toast } from 'sonner';
@@ -6,9 +6,11 @@ import { trpc } from '@/utils/trpc';
 
 export function CropImageNode({ id, data, selected }: NodeProps) {
   const [isProcessing, setIsProcessing] = useState(false);
-  // Remove local outputImage state to force reading from props
   const [showInfo, setShowInfo] = useState(false);
   
+  // 1. State for Polling (The Task ID)
+  const [runId, setRunId] = useState<string | null>(null);
+
   // Defaults
   const [params, setParams] = useState({
     x: data.x !== undefined ? data.x : 0,
@@ -17,36 +19,80 @@ export function CropImageNode({ id, data, selected }: NodeProps) {
     height: data.height !== undefined ? data.height : 100,
   });
 
-  // FIX: Get setNodes
   const { getNodes, getEdges, setNodes } = useReactFlow();
   const edges = useStore((s) => s.edges);
 
   const isConnected = (handleId: string) => edges.some((e) => e.target === id && e.targetHandle === handleId);
   const isConfigConnected = isConnected('config-input');
 
+  // 2. Mutation: Starts task & gets runId (No waiting here)
   const cropMutation = trpc.media.cropImage.useMutation({
     onSuccess: (res) => {
-        // FIX: Update global state on success
-        setNodes((nodes) => nodes.map((node) => {
-            if (node.id === id) {
-                return {
-                    ...node,
-                    data: { ...node.data, outputImage: res.imageUrl }
-                };
-            }
-            return node;
-        }));
-
-        // Also update local data ref
-        data.outputImage = res.imageUrl; 
-        setIsProcessing(false);
-        toast.success("Image cropped!");
+      setRunId(res.runId); // Save ID to start polling
+      toast.info("Processing started...");
     },
     onError: (err) => {
-        setIsProcessing(false);
-        toast.error(err.message);
+      setIsProcessing(false);
+      toast.error(`Failed to start: ${err.message}`);
     }
   });
+
+  // 3. Query: Polls status every 1s if we have a runId
+  const statusQuery = trpc.media.getRunStatus.useQuery(
+    { runId: runId! },
+    {
+      enabled: !!runId,
+      refetchInterval: 1000, 
+    }
+  );
+
+  // 4. Effect: Watch Polling Results
+  useEffect(() => {
+    if (!statusQuery.data) return;
+
+    const { status, output, error } = statusQuery.data;
+
+    if (status === "COMPLETED" && output) {
+
+       // 🔍 Robust Extraction: Handles string or object return formats
+       let finalUrl = "";
+       if (typeof output === "string") {
+           finalUrl = output; 
+       } else if (typeof output === "object" && output !== null) {
+           // @ts-ignore - Check common keys
+           finalUrl = output.imageUrl || output.url || output.secure_url || output.image;
+       }
+
+       if (!finalUrl) {
+           toast.error("Task completed but returned no image URL");
+           return;
+       }
+
+       // Update Global Graph State
+       setNodes((nodes) => nodes.map((node) => {
+         if (node.id === id) {
+           return {
+             ...node,
+             data: { ...node.data, outputImage: finalUrl }
+           };
+         }
+         return node;
+       }));
+
+       // Update Local Data Ref
+       data.outputImage = finalUrl;
+
+       // Cleanup
+       setRunId(null);
+       setIsProcessing(false);
+       toast.success("Image cropped successfully!");
+    } 
+    else if (status === "FAILED" || status === "CANCELED" || status === "CRASHED") {
+       setRunId(null);
+       setIsProcessing(false);
+       toast.error(`Task failed: ${error?.message || "Unknown error"}`);
+    }
+  }, [statusQuery.data, id, setNodes, data]);
 
   const handleParamChange = (key: keyof typeof params, value: string) => {
     const num = parseFloat(value);
@@ -69,7 +115,7 @@ export function CropImageNode({ id, data, selected }: NodeProps) {
     }
     const sourceNode = allNodes.find(n => n.id === inputEdge.source);
     
-    // FIX: Smart Data Extraction
+    // Smart Data Extraction
     let inputImageUrl = "";
     if (sourceNode?.type === 'extractFrameNode') {
         inputImageUrl = sourceNode.data.outputImage;
@@ -87,21 +133,18 @@ export function CropImageNode({ id, data, selected }: NodeProps) {
     // 2. Resolve Parameters
     let finalParams = { ...params };
 
-    // A. Check GLOBAL Config Handle first (PARSING LOGIC ADDED HERE)
+    // A. Check GLOBAL Config Handle first
     if (isConfigConnected) {
         const configEdge = allEdges.find(e => e.target === id && e.targetHandle === 'config-input');
         if (configEdge) {
             const node = allNodes.find(n => n.id === configEdge.source);
-            // Text Node stores value in 'label'
             const text = node?.data?.label || "";
             
             try {
-                // Try JSON first
                 const json = JSON.parse(text);
                 finalParams = { ...finalParams, ...json };
                 toast.success("Applied Config from JSON");
             } catch (e) {
-                // Try Parsing "Key: Value" lines
                 const lines = String(text).split('\n');
                 let foundAny = false;
                 lines.forEach(line => {
@@ -120,7 +163,7 @@ export function CropImageNode({ id, data, selected }: NodeProps) {
         }
     }
 
-    // B. Check Individual Handles (Override global config)
+    // B. Check Individual Handles
     ['x', 'y', 'width', 'height'].forEach((param) => {
         if (isConnected(param)) {
             const edge = allEdges.find(e => e.target === id && e.targetHandle === param);
@@ -230,8 +273,8 @@ export function CropImageNode({ id, data, selected }: NodeProps) {
                                 className={`
                                     -left-4.5! w-3! h-3! border-2! transition-all
                                     ${isConfigConnected 
-                                        ? 'bg-slate-700! border-slate-700! opacity-20 cursor-not-allowed' // Visually Dimmed
-                                        : (connected ? 'bg-[#ec4899]!' : 'bg-[#18181b]! border-[#ec4899]!') // Active Pink
+                                        ? 'bg-slate-700! border-slate-700! opacity-20 cursor-not-allowed' 
+                                        : (connected ? 'bg-[#ec4899]!' : 'bg-[#18181b]! border-[#ec4899]!') 
                                     }
                                 `}
                             />
@@ -245,11 +288,14 @@ export function CropImageNode({ id, data, selected }: NodeProps) {
                 disabled={isProcessing}
                 className="flex items-center justify-center gap-2 w-full bg-white text-black py-2 rounded-lg hover:bg-slate-200 transition-colors disabled:opacity-50"
             >
-                {isProcessing ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} fill="black" />}
-                <span className="text-xs font-bold">Crop Now</span>
+                {/* Loader shows when Processing OR runId exists (polling) */}
+                {isProcessing || runId ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} fill="black" />}
+                <span className="text-xs font-bold">
+                    {runId ? "Processing..." : "Crop Now"}
+                </span>
             </button>
 
-            {/* FIX: Use data.outputImage directly */}
+            {/* Result Image */}
             {data.outputImage && (
                 <div className="relative mt-1 rounded-lg overflow-hidden border border-[#27272a] bg-black/40">
                     <img src={data.outputImage} alt="Result" className="w-full h-32 object-contain" />
@@ -257,14 +303,13 @@ export function CropImageNode({ id, data, selected }: NodeProps) {
             )}
         </div>
 
-        {/* Main Image Input */}
+        {/* Handles */}
         <Handle 
             id="input" type="target" position={Position.Left} style={{ top: 28 }}
             className={`w-3.5! h-3.5! border-[3px]! -left-2.25! border-[#a855f7]! ${isConnected('input') ? 'bg-[#a855f7]!' : 'bg-[#18181b]!'}`}
             title="Image Input"
         />
         
-        {/* Output */}
         <Handle 
             type="source" position={Position.Right} 
             className="w-3.5! h-3.5! bg-[#18181b]! border-[3px]! border-[#a855f7]! -right-2.25!" 

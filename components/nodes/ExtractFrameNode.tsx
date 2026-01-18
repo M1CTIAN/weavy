@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Handle, Position, NodeProps, useStore, useReactFlow } from 'reactflow';
 import { Film, Play, Loader2, Image as ImageIcon, Clock, Link as LinkIcon } from 'lucide-react';
 import { toast } from 'sonner';
@@ -8,20 +8,87 @@ import { useExecutionLog } from '@/hooks/useExecutionLog';
 export function ExtractFrameNode({ id, data, selected }: NodeProps) {
   const [isProcessing, setIsProcessing] = useState(false);
   
-  // We keep manual inputs state for user typing
+  // 1. Polling State
+  const [runId, setRunId] = useState<string | null>(null);
+
+  // Manual inputs state
   const [manualTimestamp, setManualTimestamp] = useState(data.timestamp || "0");
   const [manualVideoUrl, setManualVideoUrl] = useState(data.videoUrl || "");
 
-  // FIX: Get setNodes to update global state
   const { getNodes, getEdges, setNodes } = useReactFlow();
   const edges = useStore((s) => s.edges);
   
   const { logExecution } = useExecutionLog();
-  const extractMutation = trpc.media.extractFrame.useMutation();
 
-  // Check connections
-  const isVideoConnected = edges.some((e) => e.target === id && e.targetHandle === 'video-input');
-  const isTimestampConnected = edges.some((e) => e.target === id && e.targetHandle === 'timestamp-input');
+  // 2. Mutation: Starts task & gets runId (Fire & Forget)
+  const extractMutation = trpc.media.extractFrame.useMutation({
+    onSuccess: (res) => {
+        setRunId(res.runId); // Start polling
+        toast.info("Extraction started...");
+    },
+    onError: (err) => {
+        setIsProcessing(false);
+        toast.error(`Failed to start: ${err.message}`);
+    }
+  });
+
+  // 3. Query: Polls status every 1s
+  const statusQuery = trpc.media.getRunStatus.useQuery(
+    { runId: runId! },
+    {
+      enabled: !!runId,
+      refetchInterval: 1000, 
+    }
+  );
+
+  // 4. Effect: Watch Polling Results
+  useEffect(() => {
+    if (!statusQuery.data) return;
+
+    const { status, output, error } = statusQuery.data;
+
+    if (status === "COMPLETED" && output) {
+
+       // 🔍 Robust URL Extraction
+       let finalUrl = "";
+       if (typeof output === "string") {
+           finalUrl = output; 
+       } else if (typeof output === "object" && output !== null) {
+           // @ts-ignore
+           finalUrl = output.imageUrl || output.url || output.secure_url || output.image;
+       }
+
+       if (!finalUrl) {
+           toast.error("Task completed but returned no image URL");
+           return;
+       }
+
+       // Update Global Graph State
+       setNodes((nodes) => nodes.map((node) => {
+         if (node.id === id) {
+           return {
+             ...node,
+             data: { ...node.data, outputImage: finalUrl }
+           };
+         }
+         return node;
+       }));
+
+       // Update Local Data Ref
+       data.outputImage = finalUrl;
+
+       // Cleanup
+       setRunId(null);
+       setIsProcessing(false);
+       toast.success("Frame extracted successfully!");
+    } 
+    else if (status === "FAILED" || status === "CANCELED" || status === "CRASHED") {
+       setRunId(null);
+       setIsProcessing(false);
+       toast.error(`Task failed: ${error?.message || "Unknown error"}`);
+    }
+  }, [statusQuery.data, id, setNodes, data]);
+
 
   const runExtraction = async () => {
     const allEdges = getEdges();
@@ -30,12 +97,10 @@ export function ExtractFrameNode({ id, data, selected }: NodeProps) {
     // --- A. GET VIDEO URL ---
     let videoUrl = manualVideoUrl;
 
-    if (isVideoConnected) {
+    if (isConnected('video-input')) {
         const videoEdge = allEdges.find(e => e.target === id && e.targetHandle === 'video-input');
         if (videoEdge) {
             const sourceNode = allNodes.find(n => n.id === videoEdge.source);
-            
-            // Smart Source Detection
             if (sourceNode?.type === 'videoNode') {
                 videoUrl = sourceNode.data.videoUrl;
             } else if (sourceNode?.type === 'textNode') {
@@ -46,21 +111,19 @@ export function ExtractFrameNode({ id, data, selected }: NodeProps) {
         }
     }
 
-    // Validation
     if (!videoUrl) {
-        toast.error(isVideoConnected ? "Connected Video Node has no URL yet. Did it finish uploading?" : "Please enter a Video URL.");
+        toast.error("Please enter or connect a Video URL.");
         return;
     }
-
     if (typeof videoUrl === 'string' && videoUrl.startsWith('blob:')) {
-        toast.error("Video is still local. Please wait for the Video Node to finish uploading.");
+        toast.error("Video is still uploading. Please wait.");
         return;
     }
 
     // --- B. GET TIMESTAMP ---
     let finalTimestamp = parseFloat(manualTimestamp);
     
-    if (isTimestampConnected) {
+    if (isConnected('timestamp-input')) {
         const timestampEdge = allEdges.find(e => e.target === id && e.targetHandle === 'timestamp-input');
         if (timestampEdge) {
             const tsNode = allNodes.find(n => n.id === timestampEdge.source);
@@ -68,56 +131,37 @@ export function ExtractFrameNode({ id, data, selected }: NodeProps) {
             
             if (tsValue !== undefined) {
                 const parsed = Number(String(tsValue).trim());
-                if (!isNaN(parsed)) {
-                    finalTimestamp = parsed;
-                } else {
-                    toast.error("Connected timestamp is not a valid number.");
-                    return;
-                }
+                if (!isNaN(parsed)) finalTimestamp = parsed;
             }
         }
     }
 
     setIsProcessing(true);
 
+    // Trigger the mutation (runId is handled in onSuccess above)
+    // Wrapping in logExecution for your analytics
     try {
-        const result = await logExecution(
+        await logExecution(
             id,
             'Extract Frame',
-            { videoUrl: videoUrl, timestamp: finalTimestamp }, 
+            { videoUrl, timestamp: finalTimestamp },
             async () => {
-                 const res = await extractMutation.mutateAsync({
+                 await extractMutation.mutateAsync({
                     videoUrl: videoUrl,
                     timestamp: String(finalTimestamp)
                  });
-                 return res.imageUrl; 
+                 return "Processing..."; // Placeholder return for log
             }
         );
-
-        // FIX: Explicitly update React Flow nodes so the UI re-renders immediately
-        setNodes((nodes) => nodes.map((node) => {
-            if (node.id === id) {
-                return {
-                    ...node,
-                    data: { 
-                        ...node.data, 
-                        outputImage: result 
-                    }
-                };
-            }
-            return node;
-        }));
-        
-        // Also update local ref for safety
-        data.outputImage = result; 
-        toast.success("Frame extracted!");
-
     } catch (err: any) {
-        toast.error(`Error: ${err.message}`);
-    } finally {
         setIsProcessing(false);
+        // Error toast is handled by mutation onError
     }
   };
+
+  const isConnected = (handleId: string) => edges.some((e) => e.target === id && e.targetHandle === handleId);
+  const isVideoConnected = isConnected('video-input');
+  const isTimestampConnected = isConnected('timestamp-input');
 
   return (
     <div 
@@ -188,11 +232,14 @@ export function ExtractFrameNode({ id, data, selected }: NodeProps) {
                 disabled={isProcessing}
                 className="flex items-center justify-center gap-2 w-full bg-white text-black py-2 rounded-lg hover:bg-slate-200 transition-colors disabled:opacity-50"
             >
-                {isProcessing ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} fill="black" />}
-                <span className="text-xs font-bold">Extract Frame</span>
+                {/* Visual change: If runId exists, we are polling */}
+                {isProcessing || runId ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} fill="black" />}
+                <span className="text-xs font-bold">
+                    {runId ? "Extracting..." : "Extract Frame"}
+                </span>
             </button>
 
-            {/* Result Image - FIX: Use data.outputImage directly */}
+            {/* Result Image */}
             {data.outputImage && (
                 <div className="relative mt-1 rounded-lg overflow-hidden border border-[#27272a] bg-black/40 group/img">
                     <img src={data.outputImage} alt="Result" className="w-full h-32 object-contain" />

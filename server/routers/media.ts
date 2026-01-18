@@ -3,39 +3,14 @@ import { router, publicProcedure } from "../trpc";
 import { tasks, runs } from "@trigger.dev/sdk/v3"; 
 import crypto from "crypto";
 
-// --- Helper: Trigger.dev Polling ---
-async function triggerAndWait(taskId: string, payload: any) {
-  const handle = await tasks.trigger(taskId, payload);
-  console.log(`Task ${taskId} triggered. ID: ${handle.id}. Polling for result...`);
-
-  const maxAttempts = 60;
-  for (let i = 0; i < maxAttempts; i++) {
-    const run = await runs.retrieve(handle.id);
-
-    if (run.status === "COMPLETED") {
-      return run.output;
-    }
-    
-    if (run.status === "FAILED" || run.status === "CANCELED" || run.status === "CRASHED") {
-       throw new Error(run.error?.message || "Task failed during execution");
-    }
-
-    await new Promise(resolve => setTimeout(resolve, 1000));
-  }
-  
-  throw new Error("Task timed out waiting for result.");
-}
-
 // --- Helper: Transloadit Signature Generation ---
 function signTransloaditRequest(type: 'image' | 'video') {
   const utcDate = new Date();
   utcDate.setHours(utcDate.getHours() + 1); 
 
-  // 👇 UPDATED: Uses your variable names
   const authKey = process.env.TRANSLOADIT_KEY;
   const authSecret = process.env.TRANSLOADIT_SECRET;
 
-  // Select Template ID
   const templateId = type === 'video' 
     ? process.env.TRANSLOADIT_VIDEO_TEMPLATE_ID 
     : process.env.TRANSLOADIT_TEMPLATE_ID;
@@ -49,7 +24,7 @@ function signTransloaditRequest(type: 'image' | 'video') {
 
   const params = {
     auth: { 
-      key: authKey, // Using 'TRANSLOADIT_KEY'
+      key: authKey, 
       expires: utcDate.toISOString(), 
     },
     template_id: templateId, 
@@ -57,7 +32,6 @@ function signTransloaditRequest(type: 'image' | 'video') {
 
   const paramsString = JSON.stringify(params);
   
-  // Calculate Signature using 'TRANSLOADIT_SECRET'
   const signature = crypto
     .createHmac('sha1', authSecret)
     .update(paramsString)
@@ -70,20 +44,31 @@ function signTransloaditRequest(type: 'image' | 'video') {
 }
 
 export const mediaRouter = router({
-  // 1. Get Secure Upload Signature
+  // 1. Get Secure Upload Signature (Standard)
   getUploadSignature: publicProcedure
     .input(z.object({ 
       type: z.enum(['image', 'video']) 
     }))
     .mutation(async ({ input }) => {
-      // Validate secret exists before trying to sign
       if (!process.env.TRANSLOADIT_SECRET) {
         throw new Error("Server missing Transloadit keys (TRANSLOADIT_SECRET)");
       }
       return signTransloaditRequest(input.type);
     }),
 
-  // ... (keep cropImage, extractFrame, upload procedures exactly as they were) ...
+  // 2. POLLING ENDPOINT: Frontend calls this to check task status
+  getRunStatus: publicProcedure
+    .input(z.object({ runId: z.string() }))
+    .query(async ({ input }) => {
+      const run = await runs.retrieve(input.runId);
+      return { 
+        status: run.status, 
+        output: run.output, 
+        error: run.error 
+      };
+    }),
+
+  // 3. Crop Image (Fire-and-Forget)
   cropImage: publicProcedure
     .input(
       z.object({
@@ -97,11 +82,12 @@ export const mediaRouter = router({
       })
     )
     .mutation(async ({ input }) => {
-      // @ts-ignore
-      const result = await triggerAndWait("media-crop-image", input);
-      return { imageUrl: (result as any).imageUrl };
+      // Triggers the task and returns immediately
+      const handle = await tasks.trigger("media-crop-image", input);
+      return { runId: handle.id };
     }),
 
+  // 4. Extract Frame (Fire-and-Forget)
   extractFrame: publicProcedure
     .input(
       z.object({
@@ -110,18 +96,18 @@ export const mediaRouter = router({
       })
     )
     .mutation(async ({ input }) => {
-      // @ts-ignore
-      const result = await triggerAndWait("media-extract-frame", input);
-      return { imageUrl: (result as any).imageUrl };
+      const handle = await tasks.trigger("media-extract-frame", input);
+      return { runId: handle.id };
     }),
 
+  // 5. Upload (Fire-and-Forget)
   upload: publicProcedure
     .input(z.object({
       fileData: z.string(), 
       fileName: z.string(),
     }))
     .mutation(async ({ input }) => {
-      // @ts-ignore
-      return await triggerAndWait("media-upload", input);
+      const handle = await tasks.trigger("media-upload", input);
+      return { runId: handle.id };
     }),
 });
