@@ -4,7 +4,6 @@ import { DM_Sans } from "next/font/google";
 import "./globals.css";
 import { Providers } from "@/components/Providers";
 import { Toaster } from 'sonner';
-import { TRPCProvider } from "@/components/TRPCProvider"; // ✅ Imported
 
 const dmSans = DM_Sans({
   subsets: ["latin"],
@@ -27,12 +26,10 @@ export default function RootLayout({
       <html lang="en">
         <body className={`${dmSans.variable} font-sans bg-[#09090b] text-slate-100 antialiased`}>
           {/* ✅ Wrap application with TRPCProvider */}
-          <TRPCProvider>
             <Providers>
               {children}
               <Toaster position="bottom-right" theme="dark" />
             </Providers>
-          </TRPCProvider>
         </body>
       </html>
     </ClerkProvider>
