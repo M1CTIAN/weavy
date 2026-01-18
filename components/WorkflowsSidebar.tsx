@@ -61,7 +61,7 @@ export const WorkflowsSidebar = () => {
                 className="w-full flex items-center gap-3 px-2 py-2 cursor-pointer hover:bg-[#27272a] rounded-lg transition-colors group text-left border border-transparent hover:border-[#3f3f46]/50"
             >
                 {/* Avatar */}
-                <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-purple-500 to-blue-500 shrink-0 overflow-hidden">
+                <div className="w-8 h-8 rounded-full bg-linear-to-tr from-purple-500 to-blue-500 shrink-0 overflow-hidden">
                     {user?.imageUrl && (
                         <img src={user.imageUrl} alt="Profile" className="w-full h-full object-cover" />
                     )}
