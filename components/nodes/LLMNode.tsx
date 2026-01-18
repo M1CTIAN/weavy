@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Handle, Position, NodeProps, useStore, useReactFlow } from 'reactflow';
+import React, { useState, useEffect } from 'react';
+import { Handle, Position, NodeProps, useStore, useReactFlow, useUpdateNodeInternals } from 'reactflow';
 import { Bot, ChevronDown, MoreHorizontal, Plus, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { trpc } from '@/utils/trpc'; 
@@ -17,6 +17,7 @@ export function LLMNode({ id, data, selected }: NodeProps) {
   const [isLoading, setIsLoading] = useState(false);
 
   const { getNodes, getEdges, setNodes } = useReactFlow();
+  const updateNodeInternals = useUpdateNodeInternals(); // ⚡ Hook to refresh handles
   const { logExecution } = useExecutionLog();
   const generateMutation = trpc.gemini.generate.useMutation();
 
@@ -29,6 +30,11 @@ export function LLMNode({ id, data, selected }: NodeProps) {
     edges.some((e) => e.target === id && e.targetHandle === `images-${i}`)
   );
 
+  // ⚡ Force React Flow to re-calculate handle positions when count changes
+  useEffect(() => {
+    updateNodeInternals(id);
+  }, [imageInputCount, id, updateNodeInternals]);
+
   const handleModelChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     setModel(e.target.value);
     data.model = e.target.value;
@@ -40,12 +46,10 @@ export function LLMNode({ id, data, selected }: NodeProps) {
     data.imageInputCount = newCount;
   };
 
-  // --- MAIN EXECUTION LOGIC ---
   const runTask = async () => {
     const allNodes = getNodes();
     const allEdges = getEdges();
 
-    // Helper to get text data
     const getConnectedText = (handleId: string) => {
       const edge = allEdges.find(e => e.target === id && e.targetHandle === handleId);
       if (!edge) return undefined;
@@ -53,21 +57,17 @@ export function LLMNode({ id, data, selected }: NodeProps) {
       return sourceNode?.data?.label || sourceNode?.data?.output;
     };
 
-    // ✅ FIXED: Helper to get IMAGE data (Checks all possible keys)
     const getConnectedImage = (handleId: string) => {
         const edge = allEdges.find(e => e.target === id && e.targetHandle === handleId);
         if (!edge) return undefined;
         const sourceNode = allNodes.find(n => n.id === edge.source);
         if (!sourceNode) return undefined;
-
-        // Check 'outputImage' (Crop/Extract) OR 'imageUrl' (ImageNode) OR 'output' (Generic)
         return sourceNode.data.outputImage || sourceNode.data.imageUrl || sourceNode.data.output;
     };
 
     const systemPrompt = getConnectedText('system') || undefined;
     const userPrompt = getConnectedText('user') || "";
     
-    // Collect images using the new smart helper
     const images: string[] = [];
     for (let i = 0; i < imageInputCount; i++) {
         const imgData = getConnectedImage(`images-${i}`);
@@ -100,7 +100,6 @@ export function LLMNode({ id, data, selected }: NodeProps) {
         }
       );
 
-      // Update Global State via setNodes
       setNodes((nodes) => nodes.map((node) => {
         if (node.id === id) {
             return {
@@ -122,8 +121,15 @@ export function LLMNode({ id, data, selected }: NodeProps) {
     }
   };
 
+  // ⚡ DYNAMIC HEIGHT CALCULATION
+  // Base content height is approx 380px. 
+  // Handles start at 185px. Each handle adds 50px.
+  // We ensure the box is always tall enough to cover the lowest handle + buffer.
+  const minHeight = Math.max(380, 240 + (imageInputCount * 50));
+
   return (
     <div 
+      style={{ minHeight: `${minHeight}px` }}
       className={`
         relative flex flex-col w-95 rounded-[24px] border shadow-2xl overflow-visible font-sans
         transition-all duration-200 group z-10
@@ -145,7 +151,7 @@ export function LLMNode({ id, data, selected }: NodeProps) {
         </div>
 
         {/* --- Body --- */}
-        <div className="px-5 pb-5 flex flex-col gap-4">
+        <div className="px-5 pb-5 flex flex-col gap-4 flex-1">
             
             {/* Configuration */}
             <div>
@@ -166,8 +172,8 @@ export function LLMNode({ id, data, selected }: NodeProps) {
                 </div>
             </div>
 
-            {/* Output Box */}
-            <div className="relative w-full h-35 bg-[#18181b] rounded-xl border border-[#27272a] flex flex-col p-4">
+            {/* Output Box - flex-1 ensures it pushes footer to bottom if height grows */}
+            <div className="relative w-full h-35 bg-[#18181b] rounded-xl border border-[#27272a] flex flex-col p-4 flex-1">
                 <div className="flex-1 w-full overflow-y-auto pr-1 scrollbar-thin scrollbar-thumb-[#27272a] scrollbar-track-transparent hover:scrollbar-thumb-slate-600 transition-colors">
                     {isLoading ? (
                         <div className="flex flex-col items-center justify-center h-full gap-2 text-slate-500">
@@ -189,7 +195,7 @@ export function LLMNode({ id, data, selected }: NodeProps) {
             </div>
 
             {/* Footer */}
-            <div className="flex items-center justify-between mt-1">
+            <div className="flex items-center justify-between mt-auto pt-2">
                 <button 
                     onClick={addImageInput}
                     className="flex items-center gap-1.5 text-slate-500 hover:text-slate-300 transition-colors text-xs font-medium"
@@ -258,6 +264,7 @@ export function LLMNode({ id, data, selected }: NodeProps) {
                 border-[#facc15]!
                 ${isOutputConnected ? 'bg-[#facc15]!' : 'bg-[#09090b]!'}
             `}
+            // Ensure output handle stays at the bottom relative to inputs
             style={{ top: `${185 + imageInputCount * 50}px` }}
             title="Generated Text"
         />
