@@ -1,0 +1,25 @@
+name: Deploy to Trigger.dev
+
+on:
+  push:
+    branches:
+      - main  # Or 'master', whichever is your default
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Install Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: "20"
+          
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Deploy to Trigger.dev
+        env:
+          TRIGGER_ACCESS_TOKEN: ${{ secrets.TRIGGER_ACCESS_TOKEN }}
+        run: npx trigger.dev@latest deploy --project-ref proj_oecmydmfjsbnhwqelexu
