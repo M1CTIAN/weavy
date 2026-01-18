@@ -5,19 +5,13 @@ import { httpBatchLink } from "@trpc/client";
 import React, { useState } from "react";
 import { trpc } from "@/utils/trpc";
 
-function getBaseUrl() {
-  if (typeof window !== "undefined") return ""; // Browser should use relative path
-  if (process.env.VERCEL_URL) return `https://${process.env.VERCEL_URL}`; // Vercel SSR
-  return "http://localhost:3000"; // Localhost SSR
-}
-
 export function TRPCProvider({ children }: { children: React.ReactNode }) {
   const [queryClient] = useState(() => new QueryClient());
   const [trpcClient] = useState(() =>
     trpc.createClient({
       links: [
         httpBatchLink({
-          url: `${getBaseUrl()}/api/trpc`,
+          url: "https://weavy-six.vercel.app/api/trpc",
         }),
       ],
     })
