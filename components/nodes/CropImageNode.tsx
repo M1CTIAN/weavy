@@ -1,16 +1,14 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { Handle, Position, NodeProps, useStore, useReactFlow } from 'reactflow';
 import { Crop, Play, Loader2, Settings2, Info, Terminal } from 'lucide-react';
 import { toast } from 'sonner';
 import { trpc } from '@/utils/trpc';
+import { useExecutionLog } from '@/hooks/useExecutionLog';
 
 export function CropImageNode({ id, data, selected }: NodeProps) {
   const [isProcessing, setIsProcessing] = useState(false);
   const [showInfo, setShowInfo] = useState(false);
   
-  // 1. State for Polling (The Task ID)
-  const [runId, setRunId] = useState<string | null>(null);
-
   // Defaults
   const [params, setParams] = useState({
     x: data.x !== undefined ? data.x : 0,
@@ -22,77 +20,42 @@ export function CropImageNode({ id, data, selected }: NodeProps) {
   const { getNodes, getEdges, setNodes } = useReactFlow();
   const edges = useStore((s) => s.edges);
 
+  const { logExecution } = useExecutionLog();
+  const utils = trpc.useContext();
+  const cropMutation = trpc.media.cropImage.useMutation();
+
   const isConnected = (handleId: string) => edges.some((e) => e.target === id && e.targetHandle === handleId);
   const isConfigConnected = isConnected('config-input');
 
-  // 2. Mutation: Starts task & gets runId (No waiting here)
-  const cropMutation = trpc.media.cropImage.useMutation({
-    onSuccess: (res) => {
-      setRunId(res.runId); // Save ID to start polling
-      toast.info("Processing started...");
-    },
-    onError: (err) => {
-      setIsProcessing(false);
-      toast.error(`Failed to start: ${err.message}`);
+  // --- Helper: Poll for Task Completion ---
+  const pollForCompletion = async (runId: string): Promise<string> => {
+    // Poll for up to 5 minutes
+    for (let i = 0; i < 300; i++) {
+        const result = await utils.media.getRunStatus.fetch(
+            { runId }, 
+            { staleTime: 0 } // Force fresh fetch
+        );
+        
+        if (result.status === "COMPLETED" && result.output) {
+            let finalUrl = "";
+            if (typeof result.output === "string") {
+                finalUrl = result.output;
+            } else if (typeof result.output === "object" && result.output !== null) {
+                // @ts-ignore
+                finalUrl = result.output.imageUrl || result.output.url || result.output.secure_url || result.output.image;
+            }
+            if (finalUrl) return finalUrl;
+        }
+
+        if (["FAILED", "CANCELED", "CRASHED"].includes(result.status)) {
+            throw new Error(`Task failed: ${result.error?.message || result.status}`);
+        }
+
+        const delay = i < 10 ? 500 : 1000;
+        await new Promise(r => setTimeout(r, delay));
     }
-  });
-
-  // 3. Query: Polls status every 1s if we have a runId
-  const statusQuery = trpc.media.getRunStatus.useQuery(
-    { runId: runId! },
-    {
-      enabled: !!runId,
-      refetchInterval: 1000, 
-    }
-  );
-
-  // 4. Effect: Watch Polling Results
-  useEffect(() => {
-    if (!statusQuery.data) return;
-
-    const { status, output, error } = statusQuery.data;
-
-    if (status === "COMPLETED" && output) {
-
-       // 🔍 Robust Extraction: Handles string or object return formats
-       let finalUrl = "";
-       if (typeof output === "string") {
-           finalUrl = output; 
-       } else if (typeof output === "object" && output !== null) {
-           // @ts-ignore - Check common keys
-           finalUrl = output.imageUrl || output.url || output.secure_url || output.image;
-       }
-
-       if (!finalUrl) {
-           toast.error("Task completed but returned no image URL");
-           return;
-       }
-
-       // Update Global Graph State
-       setNodes((nodes) => nodes.map((node) => {
-         if (node.id === id) {
-           return {
-             ...node,
-             data: { ...node.data, outputImage: finalUrl }
-           };
-         }
-         return node;
-       }));
-
-       // Update Local Data Ref
-       data.outputImage = finalUrl;
-
-       // Cleanup
-       setRunId(null);
-       setIsProcessing(false);
-       toast.success("Image cropped successfully!");
-    } 
-    else if (status === "FAILED" || status === "CANCELED" || status === "CRASHED") {
-       setRunId(null);
-       setIsProcessing(false);
-       toast.error(`Task failed: ${error?.message || "Unknown error"}`);
-    }
-  }, [statusQuery.data, id, setNodes, data]);
+    throw new Error("Task timed out.");
+  };
 
   const handleParamChange = (key: keyof typeof params, value: string) => {
     const num = parseFloat(value);
@@ -176,7 +139,45 @@ export function CropImageNode({ id, data, selected }: NodeProps) {
     });
 
     setIsProcessing(true);
-    cropMutation.mutate({ imageUrl: inputImageUrl, crop: finalParams });
+
+    try {
+        // ✅ Wrap in logExecution and await the polling
+        const finalUrl = await logExecution(
+            id,
+            'Crop Image',
+            { imageUrl: inputImageUrl, ...finalParams },
+            async () => {
+                // 1. Trigger Task
+                const res = await cropMutation.mutateAsync({ 
+                    imageUrl: inputImageUrl, 
+                    crop: finalParams 
+                });
+
+                // 2. Poll for Result
+                const url = await pollForCompletion(res.runId);
+                return url;
+            }
+        );
+
+        // 3. Update UI
+        setNodes((nodes) => nodes.map((node) => {
+            if (node.id === id) {
+                return {
+                    ...node,
+                    data: { ...node.data, outputImage: finalUrl }
+                };
+            }
+            return node;
+        }));
+
+        data.outputImage = finalUrl;
+        toast.success("Image cropped successfully!");
+
+    } catch (err: any) {
+        toast.error(`Error: ${err.message}`);
+    } finally {
+        setIsProcessing(false);
+    }
   };
 
   return (
@@ -288,10 +289,9 @@ export function CropImageNode({ id, data, selected }: NodeProps) {
                 disabled={isProcessing}
                 className="flex items-center justify-center gap-2 w-full bg-white text-black py-2 rounded-lg hover:bg-slate-200 transition-colors disabled:opacity-50"
             >
-                {/* Loader shows when Processing OR runId exists (polling) */}
-                {isProcessing || runId ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} fill="black" />}
+                {isProcessing ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} fill="black" />}
                 <span className="text-xs font-bold">
-                    {runId ? "Processing..." : "Crop Now"}
+                    {isProcessing ? "Processing..." : "Crop Now"}
                 </span>
             </button>
 
@@ -303,7 +303,7 @@ export function CropImageNode({ id, data, selected }: NodeProps) {
             )}
         </div>
 
-        {/* Handles */}
+        {/* Main Image Input */}
         <Handle 
             id="input" type="target" position={Position.Left} style={{ top: 28 }}
             className={`w-3.5! h-3.5! border-[3px]! -left-2.25! border-[#a855f7]! ${isConnected('input') ? 'bg-[#a855f7]!' : 'bg-[#18181b]!'}`}

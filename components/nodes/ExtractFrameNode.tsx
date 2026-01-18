@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { Handle, Position, NodeProps, useStore, useReactFlow } from 'reactflow';
 import { Film, Play, Loader2, Image as ImageIcon, Clock, Link as LinkIcon } from 'lucide-react';
 import { toast } from 'sonner';
@@ -8,9 +8,6 @@ import { useExecutionLog } from '@/hooks/useExecutionLog';
 export function ExtractFrameNode({ id, data, selected }: NodeProps) {
   const [isProcessing, setIsProcessing] = useState(false);
   
-  // 1. Polling State
-  const [runId, setRunId] = useState<string | null>(null);
-
   // Manual inputs state
   const [manualTimestamp, setManualTimestamp] = useState(data.timestamp || "0");
   const [manualVideoUrl, setManualVideoUrl] = useState(data.videoUrl || "");
@@ -19,76 +16,40 @@ export function ExtractFrameNode({ id, data, selected }: NodeProps) {
   const edges = useStore((s) => s.edges);
   
   const { logExecution } = useExecutionLog();
+  const utils = trpc.useContext(); // Access query client for polling
+  const extractMutation = trpc.media.extractFrame.useMutation();
 
-  // 2. Mutation: Starts task & gets runId (Fire & Forget)
-  const extractMutation = trpc.media.extractFrame.useMutation({
-    onSuccess: (res) => {
-        setRunId(res.runId); // Start polling
-        toast.info("Extraction started...");
-    },
-    onError: (err) => {
-        setIsProcessing(false);
-        toast.error(`Failed to start: ${err.message}`);
+  // --- Helper: Poll for Task Completion ---
+  // We keep this local to the node to ensure we can await it
+  const pollForCompletion = async (runId: string): Promise<string> => {
+    // Poll for up to 5 minutes
+    for (let i = 0; i < 300; i++) {
+        const result = await utils.media.getRunStatus.fetch(
+            { runId }, 
+            { staleTime: 0 } // 🚀 CRITICAL: Force fresh fetch to bypass cache
+        );
+        
+        if (result.status === "COMPLETED" && result.output) {
+            let finalUrl = "";
+            if (typeof result.output === "string") {
+                finalUrl = result.output;
+            } else if (typeof result.output === "object" && result.output !== null) {
+                // @ts-ignore
+                finalUrl = result.output.imageUrl || result.output.url || result.output.secure_url || result.output.image;
+            }
+            if (finalUrl) return finalUrl;
+        }
+
+        if (["FAILED", "CANCELED", "CRASHED"].includes(result.status)) {
+            throw new Error(`Task failed: ${result.error?.message || result.status}`);
+        }
+
+        // Adaptive delay: Fast checks initially, slower later
+        const delay = i < 10 ? 500 : 1000;
+        await new Promise(r => setTimeout(r, delay));
     }
-  });
-
-  // 3. Query: Polls status every 1s
-  const statusQuery = trpc.media.getRunStatus.useQuery(
-    { runId: runId! },
-    {
-      enabled: !!runId,
-      refetchInterval: 1000, 
-    }
-  );
-
-  // 4. Effect: Watch Polling Results
-  useEffect(() => {
-    if (!statusQuery.data) return;
-
-    const { status, output, error } = statusQuery.data;
-
-    if (status === "COMPLETED" && output) {
-
-       // 🔍 Robust URL Extraction
-       let finalUrl = "";
-       if (typeof output === "string") {
-           finalUrl = output; 
-       } else if (typeof output === "object" && output !== null) {
-           // @ts-ignore
-           finalUrl = output.imageUrl || output.url || output.secure_url || output.image;
-       }
-
-       if (!finalUrl) {
-           toast.error("Task completed but returned no image URL");
-           return;
-       }
-
-       // Update Global Graph State
-       setNodes((nodes) => nodes.map((node) => {
-         if (node.id === id) {
-           return {
-             ...node,
-             data: { ...node.data, outputImage: finalUrl }
-           };
-         }
-         return node;
-       }));
-
-       // Update Local Data Ref
-       data.outputImage = finalUrl;
-
-       // Cleanup
-       setRunId(null);
-       setIsProcessing(false);
-       toast.success("Frame extracted successfully!");
-    } 
-    else if (status === "FAILED" || status === "CANCELED" || status === "CRASHED") {
-       setRunId(null);
-       setIsProcessing(false);
-       toast.error(`Task failed: ${error?.message || "Unknown error"}`);
-    }
-  }, [statusQuery.data, id, setNodes, data]);
-
+    throw new Error("Task timed out.");
+  };
 
   const runExtraction = async () => {
     const allEdges = getEdges();
@@ -138,24 +99,45 @@ export function ExtractFrameNode({ id, data, selected }: NodeProps) {
 
     setIsProcessing(true);
 
-    // Trigger the mutation (runId is handled in onSuccess above)
-    // Wrapping in logExecution for your analytics
     try {
-        await logExecution(
+        // ✅ CRITICAL FIX: We await the polling inside logExecution.
+        // This ensures the return value of logExecution is the final URL,
+        // which gets saved to the History DB.
+        const finalUrl = await logExecution(
             id,
             'Extract Frame',
             { videoUrl, timestamp: finalTimestamp },
             async () => {
-                 await extractMutation.mutateAsync({
+                 // 1. Trigger Task
+                 const res = await extractMutation.mutateAsync({
                     videoUrl: videoUrl,
                     timestamp: String(finalTimestamp)
                  });
-                 return "Processing..."; // Placeholder return for log
+                 
+                 // 2. Poll for Result (Wait here!)
+                 const url = await pollForCompletion(res.runId);
+                 return url;
             }
         );
+
+        // 3. Update UI
+        setNodes((nodes) => nodes.map((node) => {
+            if (node.id === id) {
+                return {
+                    ...node,
+                    data: { ...node.data, outputImage: finalUrl }
+                };
+            }
+            return node;
+        }));
+        
+        data.outputImage = finalUrl;
+        toast.success("Frame extracted!");
+
     } catch (err: any) {
+        toast.error(`Error: ${err.message}`);
+    } finally {
         setIsProcessing(false);
-        // Error toast is handled by mutation onError
     }
   };
 
@@ -232,10 +214,9 @@ export function ExtractFrameNode({ id, data, selected }: NodeProps) {
                 disabled={isProcessing}
                 className="flex items-center justify-center gap-2 w-full bg-white text-black py-2 rounded-lg hover:bg-slate-200 transition-colors disabled:opacity-50"
             >
-                {/* Visual change: If runId exists, we are polling */}
-                {isProcessing || runId ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} fill="black" />}
+                {isProcessing ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} fill="black" />}
                 <span className="text-xs font-bold">
-                    {runId ? "Extracting..." : "Extract Frame"}
+                    {isProcessing ? "Extracting..." : "Extract Frame"}
                 </span>
             </button>
 
