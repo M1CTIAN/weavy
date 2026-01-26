@@ -74,6 +74,10 @@ async function saveInputFile(urlOrData: string, outputPath: string) {
 // --- TASK: EXTRACT FRAME ---
 export const extractFrameTask = task({
   id: "media-extract-frame",
+  // ✅ UPGRADE: Use 2GB RAM to prevent FFmpeg crashes
+  machine: {
+    preset: "medium-1x",
+  },
   maxDuration: 300,
   run: async (payload: { videoUrl: string; timestamp: string }) => {
     const { videoUrl, timestamp } = payload;
@@ -101,6 +105,10 @@ export const extractFrameTask = task({
 // --- TASK: CROP IMAGE ---
 export const cropImageTask = task({
   id: "media-crop-image",
+  // ✅ UPGRADE: Use 2GB RAM for heavy image processing
+  machine: {
+    preset: "medium-1x",
+  },
   maxDuration: 300,
   run: async (payload: { imageUrl: string; crop: any }) => {
     const { imageUrl, crop } = payload;
@@ -171,8 +179,6 @@ export const runLLMTask = task({
 
         } catch (error: any) {
             lastError = error;
-            console.warn(`⚠️ Failed ${currentModel}: ${error.message}`);
-
             // If 429 (Rate Limit), wait 5 seconds before trying next model
             if (error.message.includes("429")) {
                 await wait(5000); 
