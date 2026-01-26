@@ -4,7 +4,7 @@ export const config: TriggerConfig = {
   project: "proj_gzxpcmjzaslucncjstnh",
   logLevel: "log",
   runtime: "node",
-  maxDuration: 5000,
+  maxDuration: 5000, 
   retries: {
     enabledInDev: true,
     default: {
