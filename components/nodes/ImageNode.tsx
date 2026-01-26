@@ -1,17 +1,32 @@
-import React, { useState } from 'react';
-import { Handle, Position, NodeProps, useStore } from 'reactflow';
+import React, { useState, useEffect, memo } from 'react';
+import { Handle, Position, NodeProps, useStore, useReactFlow } from 'reactflow';
 import { Image as ImageIcon, Upload, X, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 
 const connectionSelector = (id: string) => (store: any) => 
   store.edges.some((edge: any) => edge.source === id);
 
-export function ImageNode({ id, data, selected }: NodeProps) {
-  const [preview, setPreview] = useState<string | null>(() => data?.imageUrl || null);
+export const ImageNode = memo(({ id, data, selected }: NodeProps) => {
+  // Use setNodes to update global store
+  const { setNodes } = useReactFlow();
+  
+  // Local loading state just for the upload process
   const [isUploading, setIsUploading] = useState(false);
   
   // Reactive connection check
   const isConnected = useStore(connectionSelector(id));
+
+  // Helper to update node data in the store properly
+  const updateData = (updates: any) => {
+    setNodes((nodes) =>
+      nodes.map((node) => {
+        if (node.id === id) {
+          return { ...node, data: { ...node.data, ...updates } };
+        }
+        return node;
+      })
+    );
+  };
 
   const ACCEPTED_TYPES = {
     'image/jpeg': ['.jpg', '.jpeg'],
@@ -31,12 +46,13 @@ export function ImageNode({ id, data, selected }: NodeProps) {
 
     setIsUploading(true);
 
-    // Convert to Base64 to persist across reloads
     const reader = new FileReader();
     reader.onloadend = () => {
         const base64String = reader.result as string;
-        setPreview(base64String);
-        data.imageUrl = base64String;
+        
+        // ✅ Update global store immediately
+        updateData({ imageUrl: base64String });
+        
         setIsUploading(false);
         toast.success("Image uploaded!");
     };
@@ -47,18 +63,13 @@ export function ImageNode({ id, data, selected }: NodeProps) {
     reader.readAsDataURL(file); 
   };
 
-  // Sync data.imageUrl to preview state whenever imageUrl in data changes
-  React.useEffect(() => {
-    // Always sync from data.imageUrl to preview state
-    if (data?.imageUrl) {
-      setPreview(data.imageUrl);
-    }
-  }, [data?.imageUrl]);
-
-  const clearImage = () => {
-    setPreview(null);
-    data.imageUrl = "";
+  const clearImage = (e: React.MouseEvent) => {
+    e.stopPropagation(); // Prevent triggering file input if overlay issues exist
+    updateData({ imageUrl: "" });
   };
+
+  // Use data from props directly (it will be updated by store)
+  const imageUrl = data.imageUrl;
 
   return (
     <div 
@@ -66,7 +77,7 @@ export function ImageNode({ id, data, selected }: NodeProps) {
         relative flex flex-col gap-3 p-4 rounded-[20px] border min-w-[300px] shadow-xl
         transition-all duration-200 group
         ${selected 
-            ? 'bg-[#202024] border-[#27272a]' 
+            ? 'bg-[#202024] border-[#27272a] ring-1 ring-slate-700' 
             : 'bg-[#18181b] border-[#27272a] hover:border-slate-600'
         }
       `}
@@ -81,13 +92,22 @@ export function ImageNode({ id, data, selected }: NodeProps) {
 
         {/* Upload Area */}
         <div className="relative w-full min-h-[160px] bg-[#202024] rounded-xl border border-dashed border-[#27272a] hover:border-purple-500/30 transition-colors flex flex-col items-center justify-center overflow-hidden group/upload">
-            {preview ? (
+            {imageUrl ? (
                 <>
-                    <div className="flex items-center justify-center p-3">
-                        <img src={preview} alt="Preview" className="max-w-xs max-h-64 object-contain rounded-lg" />
+                    <div className="flex items-center justify-center p-3 w-full h-full">
+                        <img 
+                            src={imageUrl} 
+                            alt="Preview" 
+                            className="max-w-full max-h-60 object-contain rounded-lg shadow-md" 
+                        />
                     </div>
+                    {/* Hover Overlay with Delete Button */}
                     <div className="absolute inset-0 bg-black/60 opacity-0 group-hover/upload:opacity-100 transition-opacity flex items-center justify-center gap-2">
-                        <button onClick={clearImage} className="p-2 bg-red-500/20 text-red-400 rounded-lg hover:bg-red-500/40 transition-colors">
+                        <button 
+                            onClick={clearImage} 
+                            className="p-2 bg-red-500/20 text-red-400 rounded-lg hover:bg-red-500/40 transition-colors"
+                            title="Remove Image"
+                        >
                             <X size={18} />
                         </button>
                     </div>
@@ -104,8 +124,11 @@ export function ImageNode({ id, data, selected }: NodeProps) {
             )}
             
             {isUploading && (
-                <div className="absolute inset-0 bg-black/60 flex items-center justify-center z-20 rounded-xl">
-                    <Loader2 className="animate-spin text-purple-500" />
+                <div className="absolute inset-0 bg-black/80 flex items-center justify-center z-20">
+                    <div className="flex flex-col items-center gap-2">
+                        <Loader2 className="animate-spin text-purple-500" />
+                        <span className="text-xs text-slate-400">Uploading...</span>
+                    </div>
                 </div>
             )}
         </div>
@@ -122,4 +145,6 @@ export function ImageNode({ id, data, selected }: NodeProps) {
         />
     </div>
   );
-}
+});
+
+ImageNode.displayName = "ImageNode";

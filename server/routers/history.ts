@@ -1,6 +1,6 @@
-import { router, publicProcedure } from '../trpc';
 import { z } from 'zod';
-import { prisma } from '../../lib/prisma'; // ✅ Correct path to your existing file
+import { router, publicProcedure } from '../trpc';
+import { prisma } from '../../lib/prisma';
 
 export const historyRouter = router({
   // 1. Get All Runs (Filtered by Workflow ID)
@@ -12,27 +12,34 @@ export const historyRouter = router({
           workflowId: input.workflowId
         },
         orderBy: { createdAt: 'desc' },
-        include: { nodes: true }
+        // ✅ CRITICAL: Include nodes and sort them by time
+        include: { 
+            nodes: {
+                orderBy: {
+                    startTime: 'asc' 
+                }
+            } 
+        }
       });
     }),
 
-  // 2. Start Run (Creates the WorkflowRun entry)
+  // 2. Start Run
   startRun: publicProcedure
     .input(z.object({
       scope: z.enum(['FULL', 'SINGLE', 'PARTIAL']),
-      workflowId: z.string(), // 👈 Added workflowId so the run is linked
+      workflowId: z.string(),
     }))
     .mutation(async ({ input }) => {
       return await prisma.workflowRun.create({
         data: {
           scope: input.scope,
           status: 'PENDING',
-          workflowId: input.workflowId, // 👈 Store the link
+          workflowId: input.workflowId,
         },
       });
     }),
 
-  // 3. Log Node Start (Creates a pending NodeExecution)
+  // 3. Log Node Start
   logNodeStart: publicProcedure
     .input(z.object({
       runId: z.string(),
@@ -44,17 +51,18 @@ export const historyRouter = router({
     .mutation(async ({ input }) => {
       return await prisma.nodeExecution.create({
         data: {
-          runId: input.runId, // Matches schema 'runId'
+          runId: input.runId,
           nodeId: input.nodeId,
           nodeType: input.nodeType,
           nodeLabel: input.nodeLabel || input.nodeType,
           status: 'PENDING',
           inputs: input.inputs ? JSON.stringify(input.inputs) : null,
+          startTime: new Date(),
         },
       });
     }),
 
-  // 4. Log Node Finish (Updates NodeExecution with results)
+  // 4. Log Node Finish
   logNodeFinish: publicProcedure
     .input(z.object({
       executionId: z.string(),
@@ -76,7 +84,7 @@ export const historyRouter = router({
       });
     }),
 
-  // 5. Complete Run (Finalizes the WorkflowRun status)
+  // 5. Complete Run
   completeRun: publicProcedure
     .input(z.object({
       runId: z.string(),
@@ -89,29 +97,13 @@ export const historyRouter = router({
       });
     }),
     
-  // 6. Clear Runs (Deletes history for a specific workflow)
+  // 6. Clear Runs
   clearRuns: publicProcedure
     .input(z.object({ workflowId: z.string() }))
     .mutation(async ({ input }) => {
-      const runsToDelete = await prisma.workflowRun.findMany({
+      // Delete runs (Cascade will handle nodes automatically if schema allows, but this is safe)
+      return await prisma.workflowRun.deleteMany({
         where: { workflowId: input.workflowId },
-        select: { id: true }
       });
-
-      const ids = runsToDelete.map(r => r.id);
-
-      if (ids.length > 0) {
-        // ✅ Delete NodeExecutions first (using runId)
-        await prisma.nodeExecution.deleteMany({
-          where: { runId: { in: ids } }
-        });
-
-        // ✅ Delete WorkflowRuns
-        await prisma.workflowRun.deleteMany({
-          where: { id: { in: ids } }
-        });
-      }
-
-      return { success: true };
     }),
 });

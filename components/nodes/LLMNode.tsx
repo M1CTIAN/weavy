@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, memo } from 'react';
 import { Handle, Position, NodeProps, useStore, useReactFlow, useUpdateNodeInternals } from 'reactflow';
-import { Bot, ChevronDown, MoreHorizontal, Plus, Loader2 } from 'lucide-react';
+import { Bot, ChevronDown, MoreHorizontal, Plus, Loader2, Image as ImageIcon } from 'lucide-react';
 import { toast } from 'sonner';
 import { trpc } from '@/utils/trpc';
 import { useExecutionLog } from '@/hooks/useExecutionLog';
@@ -11,16 +11,21 @@ const MODELS = [
     { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash' },
 ];
 
-export function LLMNode({ id, data, selected }: NodeProps) {
-    const [model, setModel] = useState(data.model || 'gemini-2.5-flash');
-    const [imageInputCount, setImageInputCount] = useState(data.imageInputCount || 1);
-    const [isLoading, setIsLoading] = useState(false);
+export const LLMNode = memo(({ id, data, selected }: NodeProps) => {
+    // 1. Read directly from data (Store Source of Truth)
+    const model = data.model || 'gemini-2.5-flash';
+    const imageInputCount = data.imageInputCount || 1;
+    
+    // Global vs Local loading state
+    const isGlobalRunning = data.isRunning || false;
+    const [isLocalRunning, setIsLocalRunning] = useState(false);
+    const isLoading = isGlobalRunning || isLocalRunning;
 
     const { getNodes, getEdges, setNodes } = useReactFlow();
     const updateNodeInternals = useUpdateNodeInternals();
     const { logExecution } = useExecutionLog();
 
-    // 1. Get Utils for Polling
+    // Utils for Local Run
     const utils = trpc.useUtils();
     const generateMutation = trpc.gemini.generate.useMutation();
 
@@ -37,43 +42,47 @@ export function LLMNode({ id, data, selected }: NodeProps) {
         updateNodeInternals(id);
     }, [imageInputCount, id, updateNodeInternals]);
 
+    // ✅ Helper to update global store
+    const updateData = (updates: any) => {
+        setNodes((nodes) =>
+            nodes.map((node) => {
+                if (node.id === id) {
+                    return { ...node, data: { ...node.data, ...updates } };
+                }
+                return node;
+            })
+        );
+    };
+
     const handleModelChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-        setModel(e.target.value);
-        data.model = e.target.value;
+        updateData({ model: e.target.value });
     };
 
     const addImageInput = () => {
-        const newCount = imageInputCount + 1;
-        setImageInputCount(newCount);
-        data.imageInputCount = newCount;
+        updateData({ imageInputCount: imageInputCount + 1 });
     };
 
-    // --- HELPER: Poll for Completion ---
+    // --- HELPER: Poll for Completion (For Local Run) ---
     const pollForCompletion = async (runId: string): Promise<string> => {
-        // Poll for up to 2 minutes
         for (let i = 0; i < 120; i++) {
-            // Force fresh fetch
             const result = await utils.media.getRunStatus.fetch({ runId }, { staleTime: 0 });
 
             if (result.status === "COMPLETED" && result.output) {
-                // Handle object wrapper ({ text: "..." }) or raw string
                 // @ts-ignore
                 return result.output.text || result.output;
             }
 
-            // Inside pollForCompletion function...
-
             if (["FAILED", "CRASHED", "CANCELED"].includes(result.status)) {
+                // @ts-ignore
                 const errorMessage = result.error?.message || "Job failed";
                 throw new Error(errorMessage);
             }
-
-            // Wait 1s
             await new Promise(r => setTimeout(r, 1000));
         }
         throw new Error("Timeout waiting for LLM");
     };
 
+    // --- Local "Run Model" Button Logic ---
     const runTask = async () => {
         const allNodes = getNodes();
         const allEdges = getEdges();
@@ -105,11 +114,11 @@ export function LLMNode({ id, data, selected }: NodeProps) {
         }
 
         if (!userPrompt && images.length === 0) {
-            toast.error("Please connect a Text Node (User Message) or an Image Node.");
+            toast.error("Please connect a Text Node or an Image Node.");
             return;
         }
 
-        setIsLoading(true);
+        setIsLocalRunning(true);
         toast.info(`Running ${model}...`);
 
         try {
@@ -118,40 +127,26 @@ export function LLMNode({ id, data, selected }: NodeProps) {
                 'LLM Node',
                 { model, systemPrompt, userPrompt: userPrompt.slice(0, 50) + '...' },
                 async () => {
-                    // 1. Trigger Job
                     const res = await generateMutation.mutateAsync({
                         model: model,
                         systemPrompt: systemPrompt,
                         userPrompt: userPrompt,
                         images: images.length > 0 ? images : undefined
                     });
-
-                    console.log("Job Started:", res.runId);
-
-                    // 2. Poll for Result (THE FIX)
                     const finalText = await pollForCompletion(res.runId);
                     return finalText;
                 }
             );
 
-            setNodes((nodes) => nodes.map((node) => {
-                if (node.id === id) {
-                    return {
-                        ...node,
-                        data: { ...node.data, output: result }
-                    };
-                }
-                return node;
-            }));
-
-            data.output = result;
+            // ✅ Write result back to store
+            updateData({ output: result });
             toast.success("Generation complete!");
 
         } catch (err: any) {
             console.error(err);
             toast.error(`Generation failed: ${err.message}`);
         } finally {
-            setIsLoading(false);
+            setIsLocalRunning(false);
         }
     };
 
@@ -161,14 +156,14 @@ export function LLMNode({ id, data, selected }: NodeProps) {
         <div
             style={{ minHeight: `${minHeight}px` }}
             className={`
-        relative flex flex-col w-95 rounded-[24px] border shadow-2xl overflow-visible font-sans
-        transition-all duration-200 group z-10
-        ${selected
+                relative flex flex-col w-95 rounded-[24px] border shadow-2xl overflow-visible font-sans
+                transition-all duration-200 group z-10
+                ${selected
                     ? 'bg-[#0e0e10] border-[#27272a]'
                     : 'bg-[#09090b] border-[#27272a] hover:border-slate-600'
                 }
-        ${isLoading ? 'ring-2 ring-purple-500/50 shadow-[0_0_30px_-5px_rgba(168,85,247,0.4)]' : ''}
-      `}
+                ${isLoading ? 'ring-2 ring-purple-500/50 shadow-[0_0_30px_-5px_rgba(168,85,247,0.4)]' : ''}
+            `}
         >
             {/* --- Header --- */}
             <div className="flex items-center justify-between px-5 pt-5 pb-2">
@@ -299,4 +294,6 @@ export function LLMNode({ id, data, selected }: NodeProps) {
             />
         </div>
     );
-}
+});
+
+LLMNode.displayName = "LLMNode";

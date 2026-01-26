@@ -13,15 +13,11 @@ import { createWriteStream } from "fs";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import ffmpegPath from "ffmpeg-static";
+
 
 const execFileAsync = promisify(execFile);
 
-function getFFmpegBinary(): string {
-  if (ffmpegPath && fs.existsSync(ffmpegPath)) return ffmpegPath;
-  return "ffmpeg";
-}
-const FFMPEG_BINARY = getFFmpegBinary();
+const FFMPEG_BINARY = "ffmpeg";
 
 // --- HELPER: Wait ---
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -74,7 +70,7 @@ async function saveInputFile(urlOrData: string, outputPath: string) {
 // --- TASK: EXTRACT FRAME ---
 export const extractFrameTask = task({
   id: "media-extract-frame",
-  // ✅ UPGRADE: Use 2GB RAM to prevent FFmpeg crashes
+  // ✅ Machine upgrade preserved
   machine: {
     preset: "medium-1x",
   },
@@ -86,14 +82,37 @@ export const extractFrameTask = task({
     const outputPath = path.join(tmpDir, `output-frame-${Date.now()}.png`);
 
     try {
+      console.log(`⬇️ Downloading ${videoUrl}...`);
       await saveInputFile(videoUrl, inputPath);
-      await execFileAsync(FFMPEG_BINARY, ['-ss', timestamp, '-i', inputPath, '-frames:v', '1', '-q:v', '2', '-y', outputPath]);
+
+      // 🔍 Debug: Check file size
+      const stats = await fs.promises.stat(inputPath);
+      console.log(`📄 Input video size: ${stats.size} bytes`);
+      if (stats.size < 1000) {
+          throw new Error("Downloaded video file is too small/empty.");
+      }
+
+      console.log(`🎬 Running FFmpeg on timestamp: ${timestamp}`);
       
-      if (!fs.existsSync(outputPath)) throw new Error(`FFmpeg failed.`);
+      const { stderr } = await execFileAsync(FFMPEG_BINARY, [
+        '-ss', timestamp,
+        '-i', inputPath,
+        '-frames:v', '1',
+        '-q:v', '2',
+        '-y', outputPath
+      ]);
+      
+      if (!fs.existsSync(outputPath)) {
+          console.error("❌ FFmpeg failed to generate image. Stderr:", stderr);
+          throw new Error(`FFmpeg ran but produced no file. Check timestamp/video.`);
+      }
+
       const publicUrl = await uploadToTransloadit(outputPath);
       return { imageUrl: publicUrl };
 
     } catch (error: any) {
+      // Log FFmpeg-specific errors
+      if (error.stderr) console.error("🚨 FFmpeg Stderr:", error.stderr);
       throw new Error(error.message || "Extraction error");
     } finally {
         await fs.promises.unlink(inputPath).catch(() => {});
@@ -105,7 +124,6 @@ export const extractFrameTask = task({
 // --- TASK: CROP IMAGE ---
 export const cropImageTask = task({
   id: "media-crop-image",
-  // ✅ UPGRADE: Use 2GB RAM for heavy image processing
   machine: {
     preset: "medium-1x",
   },
@@ -119,12 +137,14 @@ export const cropImageTask = task({
     try {
       await saveInputFile(imageUrl, inputPath);
       const cropFilter = `crop=iw*${crop.width / 100}:ih*${crop.height / 100}:iw*${crop.x / 100}:ih*${crop.y / 100}`;
+      
       await execFileAsync(FFMPEG_BINARY, ['-i', inputPath, '-vf', cropFilter, '-y', outputPath]);
       
       const publicUrl = await uploadToTransloadit(outputPath);
       return { imageUrl: publicUrl };
 
     } catch (error: any) {
+      if (error.stderr) console.error("🚨 Crop FFmpeg Error:", error.stderr);
       throw new Error(error.message || "Crop error");
     } finally {
         await fs.promises.unlink(inputPath).catch(() => {});
@@ -160,7 +180,6 @@ export const runLLMTask = task({
         }
     }
 
-    // 🏆 PRIORITY LIST: Optimized for Free Tier Availability
     const modelCandidates = [
         "gemini-2.5-flash",
         "gemini-2.0-flash-lite-preview-02-05", 

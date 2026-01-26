@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, memo } from 'react';
 import { Handle, Position, NodeProps, useReactFlow } from 'reactflow';
 import { UploadCloud, Video, Loader2, CheckCircle2, AlertCircle, X } from 'lucide-react';
 import { toast } from 'sonner';
@@ -17,15 +17,26 @@ interface TransloaditAssembly {
   uploads?: TransloaditResult[];
 }
 
-export function VideoNode({ id, data, selected }: NodeProps) {
+export const VideoNode = memo(({ id, data, selected }: NodeProps) => {
   const [isUploading, setIsUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const { setNodes } = useReactFlow();
   const getSignatureMutation = trpc.media.getUploadSignature.useMutation();
 
-  // ✅ FIX: Derive state directly from data (No useState for hasFile)
-  // This ensures that if 'videoUrl' loads from the DB, the player shows up.
+  // Helper to update node data in the store properly
+  const updateData = useCallback((updates: any) => {
+    setNodes((nodes) =>
+      nodes.map((node) => {
+        if (node.id === id) {
+          return { ...node, data: { ...node.data, ...updates } };
+        }
+        return node;
+      })
+    );
+  }, [setNodes, id]);
+
+  // Derive state directly from data
   const videoSrc = data.previewUrl || data.videoUrl;
   const hasFile = !!videoSrc;
 
@@ -112,39 +123,21 @@ export function VideoNode({ id, data, selected }: NodeProps) {
     // Create immediate local preview
     const localUrl = URL.createObjectURL(file);
     
-    // Optimistically update UI
-    setNodes((nodes) => nodes.map((node) => {
-        if (node.id === id) {
-           return {
-             ...node,
-             data: {
-               ...node.data,
-               previewUrl: localUrl, 
-               label: file.name
-             }
-           };
-        }
-        return node;
-    }));
+    // Optimistically update UI using helper
+    updateData({
+        previewUrl: localUrl,
+        label: file.name
+    });
 
     try {
       const publicUrl = await uploadToTransloadit(file);
       
       // ✅ Update with PERSISTENT URL from Transloadit
-      setNodes((nodes) => nodes.map((node) => {
-        if (node.id === id) {
-           return {
-             ...node,
-             data: {
-               ...node.data,
-               videoUrl: publicUrl, // This saves to DB
-               previewUrl: undefined, // Clear local blob to force using public URL
-               label: file.name
-             }
-           };
-        }
-        return node;
-      }));
+      updateData({
+        videoUrl: publicUrl, // This saves to DB
+        previewUrl: undefined, // Clear local blob to force using public URL
+        label: file.name
+      });
 
       toast.success("Video uploaded and saved!");
     } catch (err: any) {
@@ -153,33 +146,23 @@ export function VideoNode({ id, data, selected }: NodeProps) {
       toast.error(`Upload failed: ${err.message}`);
       
       // Revert on failure
-      setNodes((nodes) => nodes.map((node) => {
-        if (node.id === id) {
-           return {
-             ...node,
-             data: { ...node.data, videoUrl: undefined, previewUrl: undefined }
-           };
-        }
-        return node;
-      }));
+      updateData({
+        videoUrl: undefined,
+        previewUrl: undefined
+      });
     } finally {
       setIsUploading(false);
     }
-  }, [getSignatureMutation, setNodes, id]);
+  }, [getSignatureMutation, updateData]);
 
   const handleRemoveVideo = (e: React.MouseEvent) => {
     e.stopPropagation();
     setError(null);
-
-    setNodes((nds) => nds.map((node) => {
-      if (node.id === id) {
-        return {
-          ...node,
-          data: { ...node.data, videoUrl: undefined, label: undefined, previewUrl: undefined }
-        };
-      }
-      return node;
-    }));
+    updateData({
+        videoUrl: undefined,
+        label: undefined,
+        previewUrl: undefined
+    });
   };
 
   return (
@@ -261,4 +244,6 @@ export function VideoNode({ id, data, selected }: NodeProps) {
       />
     </div>
   );
-}
+});
+
+VideoNode.displayName = "VideoNode";

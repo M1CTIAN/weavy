@@ -1,14 +1,29 @@
-import React from 'react';
-import { Handle, Position, NodeProps, useStore } from 'reactflow';
+import React, { memo } from 'react';
+import { Handle, Position, NodeProps, useStore, useReactFlow } from 'reactflow';
 import { MoreHorizontal } from 'lucide-react';
 
 // Selector to check if this specific node has any outgoing connections
 const connectionSelector = (id: string) => (store: any) => 
   store.edges.some((edge: any) => edge.source === id);
 
-export function TextNode({ id, data, selected }: NodeProps) {
+export const TextNode = memo(({ id, data, selected }: NodeProps) => {
   // Use the reactive store to check connection status
   const isConnected = useStore(connectionSelector(id));
+  
+  // Use setNodes to update global store
+  const { setNodes } = useReactFlow();
+
+  // Helper to update node data in the store properly
+  const updateData = (label: string) => {
+    setNodes((nodes) =>
+      nodes.map((node) => {
+        if (node.id === id) {
+          return { ...node, data: { ...node.data, label } };
+        }
+        return node;
+      })
+    );
+  };
 
   return (
     <div 
@@ -16,7 +31,7 @@ export function TextNode({ id, data, selected }: NodeProps) {
         relative flex flex-col gap-3 p-4 rounded-[20px] border min-w-[320px] shadow-xl
         transition-all duration-200 group
         ${selected 
-            ? 'bg-[#202024] border-[#27272a]' 
+            ? 'bg-[#202024] border-[#27272a] ring-1 ring-slate-700' 
             : 'bg-[#18181b] border-[#27272a] hover:border-slate-600'
         }
       `}
@@ -33,16 +48,13 @@ export function TextNode({ id, data, selected }: NodeProps) {
         <div className="relative">
             <textarea 
                 className="w-full h-32 bg-[#27272a] text-slate-100 text-[14px] p-4 rounded-xl border border-transparent focus:border-pink-500/50 outline-none resize-none leading-relaxed font-normal placeholder:text-slate-500 nodrag selection:bg-pink-500/30"
-                defaultValue={data.label || ""}
+                value={data.label || ""} // Changed defaultValue to value for controlled input
                 placeholder="Enter your prompt here..."
-                onChange={(evt) => {
-                    data.label = evt.target.value; 
-                }}
+                onChange={(evt) => updateData(evt.target.value)} // ✅ Correctly updates store
             />
         </div>
 
         {/* Output Handle */}
-        {/* Logic: Pink Border Always. Fill is Pink if connected, Dark if not. */}
         <Handle 
             type="source" 
             position={Position.Right} 
@@ -54,4 +66,6 @@ export function TextNode({ id, data, selected }: NodeProps) {
         />
     </div>
   );
-}
+});
+
+TextNode.displayName = "TextNode";
