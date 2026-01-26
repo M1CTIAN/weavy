@@ -2,6 +2,7 @@ import { z } from "zod";
 import { router, protectedProcedure } from "../trpc"; 
 import { prisma } from "@/lib/prisma"; 
 import { TRPCError } from "@trpc/server";
+import { workflowTask } from "../../jobs/workflow";
 
 // --- DEFAULT WORKFLOW DATA ---
 const DEFAULT_WORKFLOW = {
@@ -313,17 +314,35 @@ const DEFAULT_WORKFLOW = {
 };
 
 export const workflowRouter = router({
+  
+  // ✅ NEW ENDPOINT: TRIGGER SERVER-SIDE EXECUTION
+  run: protectedProcedure
+    .input(
+      z.object({
+        nodes: z.array(z.any()), // Pass raw nodes
+        edges: z.array(z.any()), // Pass raw edges
+      })
+    )
+    .mutation(async ({ input }) => {
+      console.log("🚀 Triggering Workflow Job via Trigger.dev...");
+
+      // Offload the heavy lifting to the Background Worker
+      const run = await workflowTask.trigger({
+        nodes: input.nodes,
+        edges: input.edges,
+      });
+
+      // Return the Run ID so the frontend can poll for status
+      return { runId: run.id };
+    }),
+
   // 1. GET ALL (With Lazy Seeding)
   getAll: protectedProcedure.query(async ({ ctx }) => {
-    // A. Fetch existing workflows
     const workflows = await prisma.workflow.findMany({
-      where: { 
-        userId: ctx.userId // 👈 Only fetch user's own workflows
-      },
+      where: { userId: ctx.userId },
       orderBy: { updatedAt: "desc" },
     });
 
-    // B. If user has NO workflows, create the default one automatically
     if (workflows.length === 0) {
       const newWorkflow = await prisma.workflow.create({
         data: {
@@ -333,30 +352,24 @@ export const workflowRouter = router({
           edges: DEFAULT_WORKFLOW.edges,
         }
       });
-      // Return the newly created workflow as the only item in the list
       return [newWorkflow];
     }
-
-    // C. Otherwise, return what they have
     return workflows;
   }),
 
-  // 2. GET ONE (Scoped to User)
+  // 2. GET ONE
   getOne: protectedProcedure
     .input(z.object({ id: z.string() }))
     .query(async ({ ctx, input }) => {
       const workflow = await prisma.workflow.findFirst({
-        where: { 
-          id: input.id,
-          userId: ctx.userId // 👈 Ensure ownership
-        },
+        where: { id: input.id, userId: ctx.userId },
       });
 
       if (!workflow) throw new TRPCError({ code: 'NOT_FOUND' });
       return workflow;
     }),
 
-  // 3. SAVE (Create or Update with Ownership Check)
+  // 3. SAVE
   save: protectedProcedure
     .input(
       z.object({
@@ -368,12 +381,9 @@ export const workflowRouter = router({
     )
     .mutation(async ({ ctx, input }) => {
       if (input.id) {
-        // UPDATE existing
-        // First verify ownership
         const existing = await prisma.workflow.findFirst({
             where: { id: input.id, userId: ctx.userId }
         });
-
         if (!existing) throw new TRPCError({ code: 'FORBIDDEN' });
 
         return await prisma.workflow.update({
@@ -386,28 +396,24 @@ export const workflowRouter = router({
           },
         });
       } else {
-        // CREATE new
         return await prisma.workflow.create({
           data: {
-            userId: ctx.userId, // 👈 Use authenticated User ID
+            userId: ctx.userId,
             name: input.name,
             nodes: input.nodes ?? [],
             edges: input.edges ?? [],
-            // createdAt & updatedAt handled by Prisma defaults
           },
         });
       }
     }),
 
-  // 4. DELETE (Scoped to User)
+  // 4. DELETE
   delete: protectedProcedure
     .input(z.object({ id: z.string() }))
     .mutation(async ({ ctx, input }) => {
-      // Verify ownership before delete
       const existing = await prisma.workflow.findFirst({
         where: { id: input.id, userId: ctx.userId }
       });
-
       if (!existing) throw new TRPCError({ code: 'FORBIDDEN' });
 
       return await prisma.workflow.delete({
