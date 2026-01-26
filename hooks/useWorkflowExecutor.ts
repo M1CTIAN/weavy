@@ -4,7 +4,6 @@ import { trpc } from '@/utils/trpc';
 import { useExecutionLog } from './useExecutionLog';
 import { toast } from 'sonner';
 
-// ✅ Updated Hook Signature
 export function useWorkflowExecutor() {
     const { getNodes, getEdges, setNodes } = useReactFlow();
     const { createRun, finalizeRun, logNodeStep } = useExecutionLog();
@@ -105,24 +104,31 @@ export function useWorkflowExecutor() {
     };
 
     // --- Helper: Poll for Task Completion ---
-    // Since we are running a sequence, we MUST wait for the background task to finish
-    const pollForCompletion = async (runId: string): Promise<string> => {
+    // ✅ UPDATED: Now handles both Image URLs (Media) and Text (LLM)
+    const pollForCompletion = async (runId: string): Promise<any> => {
         console.log(`⏳ Waiting for task ${runId} to finish...`);
 
-        // Attempt to poll for up to 5 minutes
+        // Poll for up to 5 minutes
         for (let i = 0; i < 300; i++) {
-            // 🚀 FORCE FRESH DATA: { staleTime: 0 } is crucial here!
+            // FORCE FRESH DATA: { staleTime: 0 } is crucial here!
             const result = await utils.media.getRunStatus.fetch(
                 { runId },
                 { staleTime: 0 }
             );
 
-            // Log status to console for debugging
             if (i % 5 === 0 || result.status === "COMPLETED") {
                 console.log(`🔄 Polling ${runId}: ${result.status}`);
             }
 
             if (result.status === "COMPLETED" && result.output) {
+                // CASE A: Text Output (LLM)
+                // @ts-ignore
+                if (result.output.text) {
+                    // @ts-ignore
+                    return result.output.text;
+                }
+
+                // CASE B: Image/Media Output
                 let finalUrl = "";
                 if (typeof result.output === "string") {
                     finalUrl = result.output;
@@ -130,16 +136,18 @@ export function useWorkflowExecutor() {
                     // @ts-ignore
                     finalUrl = result.output.imageUrl || result.output.url || result.output.secure_url || result.output.image;
                 }
+
                 if (finalUrl) return finalUrl;
+
+                // Fallback: Return raw output if no specific field found
+                return result.output;
             }
 
             if (["FAILED", "CANCELED", "CRASHED"].includes(result.status)) {
                 throw new Error(`Task failed: ${result.error?.message || result.status}`);
             }
 
-            // 🚀 ADAPTIVE DELAY:
-            // First 10 checks: Wait 500ms (Fast response for local dev)
-            // Afterward: Wait 1000ms
+            // Adaptive Delay
             const delay = i < 10 ? 500 : 1000;
             await new Promise(r => setTimeout(r, delay));
         }
@@ -178,49 +186,52 @@ export function useWorkflowExecutor() {
             try {
                 await logNodeStep(run.id, node.id, node.type || 'Unknown', inputs, async () => {
 
-                    // --- A. LLM Node ---
+                    // --- A. LLM Node (✅ FIXED: Now uses Polling) ---
                     if (node.type === 'llmNode') {
-                        const res = await generateText.mutateAsync({
-                            model: node.data.model || 'gemini-2.5-flash',
+                        // 1. Trigger the Job
+                        const startRes = await generateText.mutateAsync({
+                            model: node.data.model || 'gemini-1.5-flash',
                             systemPrompt: inputs.systemPrompt,
                             userPrompt: inputs.userPrompt || node.data.prompt,
                             images: inputs.images
                         });
 
+                        console.log("LLM Job Started:", startRes.runId);
+
+                        // 2. Poll for Text Result
+                        const textOutput = await pollForCompletion(startRes.runId);
+
+                        // 3. Update State
                         setNodes((nds) => nds.map((n) =>
-                            n.id === node.id ? { ...n, data: { ...n.data, output: res.output } } : n
+                            n.id === node.id ? { ...n, data: { ...n.data, output: textOutput } } : n
                         ));
-                        return res.output;
+                        return textOutput;
                     }
 
-                    // --- B. Extract Frame Node (UPDATED: POLLING) ---
+                    // --- B. Extract Frame Node ---
                     else if (node.type === 'extractFrameNode') {
                         const videoUrl = inputs.videoUrl || node.data.videoUrl;
                         if (!videoUrl) throw new Error("No video URL provided.");
 
-                        // 1. Start Task
                         const startRes = await extractFrame.mutateAsync({
                             videoUrl,
                             timestamp: String(inputs.timestamp || node.data.timestamp || "0")
                         });
 
-                        // 2. Poll for Result
                         const imageUrl = await pollForCompletion(startRes.runId);
 
-                        // 3. Update State
                         setNodes((nds) => nds.map((n) =>
                             n.id === node.id ? { ...n, data: { ...n.data, outputImage: imageUrl } } : n
                         ));
                         return imageUrl;
                     }
 
-                    // --- C. Crop Image Node (UPDATED: POLLING) ---
+                    // --- C. Crop Image Node ---
                     else if (node.type === 'cropImageNode') {
                         const imageUrl = inputs.imageInput || node.data.imageUrl;
                         if (!imageUrl) throw new Error("No image to crop");
 
                         let extraParams: Record<string, any> = {};
-
                         if (inputs.configText) {
                             try {
                                 extraParams = JSON.parse(inputs.configText);
@@ -238,16 +249,13 @@ export function useWorkflowExecutor() {
                         const width = inputs.width ?? extraParams['width'] ?? node.data.width ?? 100;
                         const height = inputs.height ?? extraParams['height'] ?? node.data.height ?? 100;
 
-                        // 1. Start Task
                         const startRes = await cropImage.mutateAsync({
                             imageUrl,
                             crop: { x, y, width, height }
                         });
 
-                        // 2. Poll for Result
                         const croppedUrl = await pollForCompletion(startRes.runId);
 
-                        // 3. Update State
                         setNodes((nds) => nds.map((n) =>
                             n.id === node.id ? { ...n, data: { ...n.data, outputImage: croppedUrl } } : n
                         ));

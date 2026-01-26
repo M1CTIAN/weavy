@@ -91,7 +91,7 @@ function Editor({ workflowId }: { workflowId: string }) {
   const originalNameStateRef = useRef<string>("Untitled");
 
   // -------------------------------------------------------------------------------
-  // ✅ 1. CONNECTION VALIDATION (Moved INSIDE component to access 'nodes' state)
+  // 1. CONNECTION VALIDATION (Moved INSIDE component to access 'nodes' state)
   // -------------------------------------------------------------------------------
   const isValidConnection = useCallback((connection: any) => {
     const { source, targetHandle } = connection;
@@ -363,7 +363,6 @@ function Editor({ workflowId }: { workflowId: string }) {
                 deleteKeyCode={['Backspace', 'Delete']}
                 defaultEdgeOptions={defaultEdgeOptions}
                 connectionLineStyle={connectionLineStyle}
-                // ✅ PASSING THE NEW INTERNAL VALIDATION
                 isValidConnection={isValidConnection}
             >
                 <Background color="#333" gap={20} size={1} />

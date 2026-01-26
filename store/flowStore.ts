@@ -94,7 +94,7 @@ const useFlowStore = create<RFState>((set, get) => ({
   onNodesChange: (changes) => set({ nodes: applyNodeChanges(changes, get().nodes) }),
   onEdgesChange: (changes) => set({ edges: applyEdgeChanges(changes, get().edges) }),
 
-  // --- UPDATED CONNECT LOGIC: No Label, No Arrow ---
+  // --- CONNECT LOGIC ---
   onConnect: (connection: Connection) => {
     get().takeSnapshot(); 
     const { nodes, edges } = get();
@@ -121,8 +121,6 @@ const useFlowStore = create<RFState>((set, get) => ({
             strokeWidth: 3,
         },
         animated: true,
-        // REMOVED: label, labelStyle, etc.
-        // REMOVED: markerEnd (the arrow)
     };
 
     // 3. One-Input Rule (Remove existing edges on target handle)
