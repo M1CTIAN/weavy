@@ -15,5 +15,8 @@ export const config: TriggerConfig = {
       randomize: true,
     },
   },
+  build: {
+    external: ["ffmpeg-static"],
+  },
   dirs: ["./jobs"],
 };
